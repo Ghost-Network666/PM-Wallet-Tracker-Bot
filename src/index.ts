@@ -1,0 +1,117 @@
+import dotenv from 'dotenv';
+import { Client, GatewayIntentBits, Partials, Events, TextChannel } from 'discord.js';
+import { initDb, getDb, closeDb } from './db.js';
+import { handleCommand, commands } from './commands.js';
+import { startTracker, stopTracker } from './tracker.js';
+import { sleep } from './utils.js';
+
+dotenv.config();
+
+const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
+const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
+const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID!;
+const TRACKING_INTERVAL = parseInt(process.env.TRACKING_INTERVAL || '60000', 10);
+const MAX_FETCH_ITEMS = parseInt(process.env.MAX_FETCH_ITEMS || '100', 10);
+
+if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_CHANNEL_ID) {
+  console.error('Missing required environment variables. Check .env');
+  process.exit(1);
+}
+
+const client = new Client({
+  intents: [
+    GatewayIntentBits.Guilds,
+    GatewayIntentBits.GuildMessages,
+  ],
+  partials: [Partials.Channel],
+});
+
+let notificationChannel: TextChannel | null = null;
+
+async function sendNotification(message: string) {
+  if (!notificationChannel) {
+    console.warn('[bot] No notification channel available');
+    return;
+  }
+  try {
+    await notificationChannel.send(message.length > 1900 ? message.slice(0, 1900) + '…' : message);
+  } catch (e) {
+    console.error('[bot] Failed to send notification:', e);
+  }
+}
+
+async function resolveNotificationChannel(): Promise<TextChannel | null> {
+  try {
+    const ch = await client.channels.fetch(DISCORD_CHANNEL_ID);
+    if (ch && ch.isTextBased() && 'send' in ch) {
+      return ch as TextChannel;
+    }
+    console.error('Configured DISCORD_CHANNEL_ID is not a text channel.');
+    return null;
+  } catch (e) {
+    console.error('Failed to fetch notification channel:', e);
+    return null;
+  }
+}
+
+client.once(Events.ClientReady, async (c) => {
+  console.log(`✅ Logged in as ${c.user.tag}`);
+
+  notificationChannel = await resolveNotificationChannel();
+  if (!notificationChannel) {
+    console.warn('⚠️  Notifications will not be sent until channel is fixed.');
+  }
+
+  // Start background tracker
+  console.log(`🚀 Starting background tracker (interval: ${TRACKING_INTERVAL}ms)`);
+  startTracker({
+    intervalMs: TRACKING_INTERVAL,
+    sendNotification,
+    maxItems: MAX_FETCH_ITEMS,
+  }).catch(err => console.error('Tracker crashed:', err));
+});
+
+client.on(Events.InteractionCreate, async (interaction) => {
+  if (!interaction.isChatInputCommand()) return;
+
+  // Run command handler
+  await handleCommand(interaction, DISCORD_CHANNEL_ID);
+});
+
+client.on(Events.Error, (err) => {
+  console.error('Discord client error:', err);
+});
+
+// Graceful shutdown
+process.on('SIGINT', async () => {
+  console.log('\nShutting down...');
+  stopTracker();
+  client.destroy();
+  closeDb();
+  await sleep(300);
+  process.exit(0);
+});
+
+process.on('SIGTERM', async () => {
+  stopTracker();
+  client.destroy();
+  closeDb();
+  process.exit(0);
+});
+
+// Boot
+console.log('🚀 Starting PM Wallet Tracker Bot');
+console.log('   • Discord commands: 5 slash commands ready');
+console.log('   • Database: SQLite (tracked_wallets + wallet_events)');
+console.log('   • Tracking engine: polling @polymarket/client SDK');
+console.log('   • Address resolver: Polymarket profile URLs supported');
+console.log('   • Notifications: will be sent to configured channel');
+
+console.log('Initializing database...');
+initDb();
+
+console.log('Starting Discord client...');
+client.login(DISCORD_TOKEN).catch(err => {
+  console.error('Failed to login to Discord:', err);
+  process.exit(1);
+});
