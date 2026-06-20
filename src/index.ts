@@ -10,7 +10,7 @@ dotenv.config();
 const DISCORD_TOKEN = process.env.DISCORD_TOKEN!;
 const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID!;
-const TRACKING_INTERVAL = parseInt(process.env.TRACKING_INTERVAL || '60000', 10);
+const TRACKING_INTERVAL = parseInt(process.env.TRACKING_INTERVAL || '10000', 10);
 const MAX_FETCH_ITEMS = parseInt(process.env.MAX_FETCH_ITEMS || '100', 10);
 
 console.log(`🔧 Configured DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID}`);
@@ -78,6 +78,21 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
+  // Enforce that the bot only responds to interactions in the configured channel
+  if (interaction.channelId !== DISCORD_CHANNEL_ID) {
+    if (interaction.isChatInputCommand()) {
+      try {
+        await interaction.reply({
+          content: `This bot only works in the configured notification channel.`,
+          ephemeral: true
+        });
+      } catch (e) {
+        // ignore if reply fails
+      }
+    }
+    return;
+  }
+
   if (interaction.isChatInputCommand()) {
     await handleCommand(interaction, DISCORD_CHANNEL_ID);
   } else if (interaction.isButton()) {

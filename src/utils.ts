@@ -152,6 +152,10 @@ export function getEventDedupKey(item: any, typeHint = ''): string {
   if (/^0x[a-f0-9]{8,}$/.test(tx)) {
     return `tx:${tx}`;
   }
+  // Stable key for positions using conditionId (no ts needed)
+  if (item?.conditionId) {
+    return `pos:${item.conditionId}:${item.outcomeIndex ?? ''}`;
+  }
   const t = (item?.type || typeHint || 'EVENT').toString().toUpperCase();
   const ts = item?.timestamp ?? 0;
   const slug = (item?.slug || item?.title || '').toString().slice(0, 60);

@@ -28,6 +28,7 @@ No third-party APIs for data fetching. No web scraping.
 | `/combined-portfolio`| Sum portfolio values across all tracked wallets. |
 | `/export-wallets`    | Export tracked wallets as JSON file. |
 | `/import-wallets`    | Import wallets from JSON. |
+| `/interval`         | View or change the polling frequency in seconds (default 10s, min 5s). Controls how often the bot checks for updates via SDK calls (listPositions, listTrades, listActivity etc.). |
 
 ## Components
 
@@ -68,7 +69,7 @@ Fill in:
 DISCORD_TOKEN=your_bot_token
 DISCORD_CLIENT_ID=your_app_client_id
 DISCORD_CHANNEL_ID=123456789012345678
-TRACKING_INTERVAL=60000
+TRACKING_INTERVAL=10000
 ```
 
 3. **Register slash commands**:
@@ -100,7 +101,7 @@ npm start
 | `DISCORD_CLIENT_ID` | Yes | - | Application ID |
 | `DISCORD_CHANNEL_ID` | Yes | - | Channel for notifications |
 | `DISCORD_GUILD_ID` | No | - | For guild-only command registration |
-| `TRACKING_INTERVAL` | No | 60000 | Poll interval (ms) |
+| `TRACKING_INTERVAL` | No | 10000 | Poll interval (ms) — bot checks for updates every N ms using SDK calls |
 | `MAX_FETCH_ITEMS` | No | 100 | Max items fetched per data type per poll |
 
 ## Database

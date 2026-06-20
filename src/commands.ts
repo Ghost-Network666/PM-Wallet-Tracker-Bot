@@ -14,7 +14,7 @@ import {
 import { addWallet, removeWallet, renameWallet, listWallets, getWalletByNameOrAddress, updateWalletHashes, getWalletByAddress, updateWalletSettings, backfillSeenEvent } from './db.js';
 import { fetchWalletSnapshot, resolveUsernameToAddress, getSdkClient } from './polymarket.js';
 import { isValidAddress, parseWalletIdentifier, truncateAddress, shortText, formatPnL, formatPrice, formatDecimal, formatDate, formatSide, hashState, normalizeAddress, getEventDedupKey, cleanMarketTitle, formatPositionsForEmbed, formatTradesForEmbed, formatActivityForEmbed, getPortfolioValue, computeNetRealized, computeRoughWinRate, computeApproxVolume, computeActivityScore } from './utils.js';
-import { primeWalletForMonitoring } from './tracker.js';
+import { primeWalletForMonitoring, getTrackingInterval, setTrackingInterval } from './tracker.js';
 
 export const commands = [
   new SlashCommandBuilder()
@@ -113,6 +113,15 @@ export const commands = [
         .setDescription('JSON array of {address, name?}')
         .setRequired(true)
     ),
+  new SlashCommandBuilder()
+    .setName('interval')
+    .setDescription('View or change the polling frequency (in seconds, min 5). Controls how often the bot checks wallets via the SDK.')
+    .addIntegerOption(opt =>
+      opt.setName('seconds')
+        .setDescription('New interval in seconds (how often checks happen)')
+        .setRequired(false)
+        .setMinValue(5)
+    ),
 ].map(cmd => cmd.toJSON());
 
 // Clean command registry for structure and easy extension
@@ -128,6 +137,7 @@ const commandHandlers: Record<string, CommandHandler> = {
   'combined-portfolio': handleCombinedPortfolio,
   'export-wallets': handleExportWallets,
   'import-wallets': handleImportWallets,
+  'interval': handleInterval,
 };
 
 export async function handleCommand(interaction: ChatInputCommandInteraction, channelId: string) {
@@ -757,6 +767,23 @@ async function handleImportWallets(interaction: ChatInputCommandInteraction) {
     await interaction.reply(`✅ Imported ${added} wallets.`);
   } catch (e) {
     await interaction.reply('❌ Invalid JSON. Example: [{"address":"0x..","name":"Whale1"}]');
+  }
+}
+
+async function handleInterval(interaction: ChatInputCommandInteraction) {
+  await interaction.deferReply({ ephemeral: true });
+
+  const seconds = interaction.options.getInteger('seconds');
+
+  if (seconds !== null) {
+    const ms = seconds * 1000;
+    setTrackingInterval(ms);
+    const actualSeconds = Math.round(getTrackingInterval() / 1000);
+    await interaction.editReply(`✅ Polling interval set to **${actualSeconds} seconds**.\nChecks will now run every ${actualSeconds}s using the SDK (listPositions, listTrades, listActivity, etc.). Change takes effect after current sleep.`);
+  } else {
+    const currentMs = getTrackingInterval();
+    const secs = Math.round(currentMs / 1000);
+    await interaction.editReply(`Current polling interval: **${secs} seconds** (${currentMs}ms)\n\nUse \`/interval <seconds>\` to change the frequency of checks (min 5s).`);
   }
 }
 

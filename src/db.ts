@@ -74,6 +74,7 @@ export function initDb(dbPath = 'data/data.db'): void {
     CREATE INDEX IF NOT EXISTS idx_events_wallet ON wallet_events(wallet_address);
     CREATE INDEX IF NOT EXISTS idx_events_notified ON wallet_events(notified);
     CREATE INDEX IF NOT EXISTS idx_events_dedup ON wallet_events(wallet_address, dedup_key);
+    CREATE UNIQUE INDEX IF NOT EXISTS idx_events_dedup_unique ON wallet_events(wallet_address, dedup_key) WHERE dedup_key IS NOT NULL;
   `);
 
   // Add columns for existing DBs (ignore errors if already exist)
@@ -176,11 +177,17 @@ export function recordEvent(walletAddress: string, eventType: string, eventData:
   if (key && hasSeenEvent(addr, key)) {
     return -1; // skipped as duplicate
   }
-  const result = getDb()
-    .prepare('INSERT INTO wallet_events (wallet_address, event_type, event_data, dedup_key) VALUES (?, ?, ?, ?)')
-    .run(addr, eventType, json, key);
-  const id = result.lastInsertRowid as number;
-  return id;
+  try {
+    const result = getDb()
+      .prepare('INSERT OR IGNORE INTO wallet_events (wallet_address, event_type, event_data, dedup_key) VALUES (?, ?, ?, ?)')
+      .run(addr, eventType, json, key);
+    if (result.changes === 0) {
+      return -1; // duplicate key, no new row
+    }
+    return result.lastInsertRowid as number;
+  } catch {
+    return -1;
+  }
 }
 
 export function getUnnotifiedEvents(): WalletEvent[] {
@@ -254,6 +261,14 @@ export function hasSeenEvent(walletAddress: string, dedupKey: string): boolean {
   if (dedupKey.startsWith('tx:')) {
     const tx = dedupKey.slice(3);
     return hasEventWithTx(walletAddress, tx);
+  } else if (dedupKey.startsWith('pos:')) {
+    const cond = dedupKey.split(':')[1];
+    const row2 = getDb().prepare(`
+      SELECT 1 FROM wallet_events 
+      WHERE wallet_address = ? AND event_data LIKE ?
+      LIMIT 1
+    `).get(normalizeAddress(walletAddress), `%${cond}%`);
+    return !!row2;
   }
   return false;
 }

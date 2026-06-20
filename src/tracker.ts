@@ -19,6 +19,16 @@ export interface TrackerConfig {
 
 let running = false;
 
+export let trackingIntervalMs = 10000;
+
+export function setTrackingInterval(ms: number) {
+  trackingIntervalMs = Math.max(5000, ms); // minimum 5s to avoid abuse/rate limits
+}
+
+export function getTrackingInterval() {
+  return trackingIntervalMs;
+}
+
 // In-memory previous snapshots for reliable diffing (keyed by normalized address)
 const prevSnapshots = new Map<string, { positions: any[]; activity: any[]; trades: any[] }>();
 
@@ -82,7 +92,43 @@ function formatPositionChange(type: 'new' | 'closed', pos: any): string {
   const cur = pos.curPrice ? ` | Cur ${formatPrice(pos.curPrice, true)}` : '';
   const pnl = pos.cashPnl != null ? ` | PnL: ${formatPnL(pos.cashPnl)}` : '';
   const linkPart = buildLinks(pos) !== 'N/A' ? ` | ${buildLinks(pos)}` : '';
-  return `${emoji} **${label}**: **${title}**${outcome}${size}${avg}${cur}${pnl}${linkPart}`;
+  return `${emoji} ${label}: ${title}${outcome}${size}${avg}${cur}${pnl}${linkPart}`;
+}
+
+function formatCompactActivity(data: any): string {
+  const niceType = (data.type || 'EVENT').toUpperCase();
+  const emoji = getActionEmoji(niceType);
+  const title = shortText(data.title || data.slug || (niceType === 'MAKER_REBATE' ? 'Maker Rebate' : 'Unknown market'), 50);
+  let extra = data.amount ? ` ${formatPnL(data.amount)}` : '';
+  if (data.side && data.size && data.price) {
+    const prob = (parseFloat(data.price) * 100).toFixed(2);
+    extra += ` ${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) ${formatSide(data.side)}`;
+  }
+  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
+  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
+  return `${emoji} ${niceType} — ${title}${extra}${time}${links}`;
+}
+
+function formatCompactTrade(data: any): string {
+  const side = formatSide(data.side);
+  const title = shortText(data.title || data.slug || 'Unknown market', 50);
+  const outcome = data.outcome ? ` ${data.outcome}` : '';
+  let extra = '';
+  if (data.size && data.price) {
+    const value = parseFloat(data.size) * parseFloat(data.price);
+    const prob = (parseFloat(data.price) * 100).toFixed(2);
+    extra = ` ${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) (≈ ${formatPnL(value).replace(/^[^\$]+/, '')}) ${side}`;
+  }
+  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
+  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
+  return `📈 TRADE — ${title}${outcome}${extra}${time}${links}`;
+}
+
+function formatCompactFirstTime(data: any): string {
+  const title = shortText(data.title || data.slug || 'Unknown market', 50);
+  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
+  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
+  return `🆕 FIRST TIME — ${title}${time}${links}`;
 }
 
 export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
@@ -195,14 +241,17 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
         }
 
         const slug = a.slug;
-        if (s.notify_first_time && slug && !hasSeenMarket(wallet.address, slug)) {
+        const isMakerRebate = (a.type || '').toUpperCase() === 'MAKER_REBATE';
+        if (s.notify_first_time && slug && !hasSeenMarket(wallet.address, slug) && !isMakerRebate) {
           const ftKey = getEventDedupKey({ ...a, slug }, 'first_time');
           if (!hasSeenEvent(wallet.address, ftKey)) {
             recordEvent(wallet.address, 'first_time', { ...a, slug }, ftKey);
           }
           markMarketSeen(wallet.address, slug);
         }
-        recordEvent(wallet.address, 'activity', a, key);
+        if (!isMakerRebate || Math.abs(parseFloat(a.amount || '0')) >= 50) {
+          recordEvent(wallet.address, 'activity', a, key);
+        }
       }
     }
 
@@ -253,93 +302,40 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
       const short = truncateAddress(addr);
       const displayBase = w ? (w.name && w.name.includes('...') ? w.name : `${w.name}`) : short;
 
-      const embeds: any[] = [];
       const plainMessages: string[] = [];
 
       for (const ev of evs) {
         try {
           const data = JSON.parse(ev.event_data);
-          let display = w ? `**${displayBase}** (${short})` : `Wallet ${short}`;
-          if (w && w.name.includes('...')) display = `**${displayBase}**`;
+          const prefix = w && w.name && w.name.startsWith('Unnamed') ? short : `${displayBase} (${short})`;
 
-          let title = `${getActionEmoji(ev.event_type)} ${ev.event_type.toUpperCase()} for ${display}`;
-          if (ev.event_type === 'first_time') {
-            title = `${getActionEmoji(ev.event_type)} FIRST TIME interaction for ${display}`;
-          } else if (ev.event_type === 'position_new') {
-            title = `${getActionEmoji(ev.event_type)} New position for ${display}`;
-          } else if (ev.event_type === 'position_closed') {
-            title = `${getActionEmoji(ev.event_type)} Position closed for ${display}`;
-          }
-
+          let msg = '';
           if (ev.event_type === 'position_new' || ev.event_type === 'position_closed') {
             const p = data;
-            const msg = formatPositionChange(ev.event_type === 'position_new' ? 'new' : 'closed', { ...p, title: p.title || p.slug });
-            const prefix = `${displayBase} (${short})`;
-            plainMessages.push(`${prefix}\n${msg}`);
-            continue;
-          }
-
-          const embed = new EmbedBuilder()
-            .setTitle(title)
-            .setColor(getColorForType(ev.event_type))
-            .setTimestamp()
-            .setFooter({ text: 'via official @polymarket/client SDK' });
-
-          if (ev.event_type === 'trade') {
-            const t = data;
-            const value = (t.size && t.price) ? parseFloat(t.size) * parseFloat(t.price) : 0;
-            embed.addFields(
-              { name: 'Market', value: t.title || t.slug || 'Unknown market', inline: false },
-              { name: 'Outcome', value: t.outcome || 'N/A', inline: true },
-              { name: 'Details', value: `${formatSide(t.side)} ${formatDecimal(t.size)} @ ${formatPrice(t.price, true)} (≈ ${formatPnL(value).replace(/^[^\$]+/, '')})`, inline: true },
-              { name: 'Links', value: buildLinks(t) }
-            );
-            embeds.push(embed);
+            msg = formatPositionChange(ev.event_type === 'position_new' ? 'new' : 'closed', { ...p, title: p.title || p.slug });
+          } else if (ev.event_type === 'trade') {
+            msg = formatCompactTrade(data);
           } else if (ev.event_type === 'activity') {
-            const a = data;
-            const niceType = (a.type || 'EVENT').toUpperCase();
-            title = `${getActionEmoji(niceType)} ${niceType} for ${display}`;
-            const amt = a.amount ? formatPnL(a.amount) : '';
-            embed.setTitle(title); // refresh with better type
-            embed.addFields(
-              { name: 'Market', value: a.title || a.slug || 'Unknown market', inline: false },
-              { name: 'Impact', value: amt, inline: true },
-              { name: 'Links', value: buildLinks(a) }
-            );
-            embeds.push(embed);
+            msg = formatCompactActivity(data);
           } else if (ev.event_type === 'first_time') {
-            const a = data;
-            embed.addFields(
-              { name: 'Market', value: a.title || a.slug || 'Unknown market', inline: false },
-              { name: 'Type', value: a.type || 'first_time', inline: true },
-              { name: 'Links', value: buildLinks(a) }
-            );
-            embeds.push(embed);
+            msg = formatCompactFirstTime(data);
           } else {
-            embed.setDescription(`📌 ${ev.event_type}`);
-            embeds.push(embed);
+            msg = `📌 ${ev.event_type.toUpperCase()}`;
           }
+
+          plainMessages.push(`${prefix}\n${msg}`);
         } catch {
           // ignore malformed
         }
       }
 
-      // Send batched for this wallet (much less spam than one msg per event)
+      // Send batched for this wallet as clean compact text (one message per wallet for skimmability)
       try {
         if (plainMessages.length > 0) {
-          for (const m of plainMessages) {
-            await config.sendNotification(m);
-          }
-        }
-        if (embeds.length > 0) {
-          // Send as single message with up to 10 embeds + optional header
-          const header = embeds.length > 1 ? `**${displayBase}** — ${embeds.length} updates` : undefined;
-          const toSend = { ...(header ? { content: header } : {}), embeds: embeds.slice(0, 10) };
-          await config.sendNotification(toSend);
-          // If more than 10 (rare), fall back to additional
-          if (embeds.length > 10) {
-            await config.sendNotification({ embeds: embeds.slice(10, 20) });
-          }
+          const header = plainMessages.length > 1 ? `**${displayBase}** — ${plainMessages.length} updates` : '';
+          const body = plainMessages.join('\n\n');
+          const fullMsg = header ? `${header}\n${body}` : body;
+          await config.sendNotification(fullMsg.length > 1900 ? fullMsg.slice(0, 1900) + '…' : fullMsg);
         }
       } catch (e) {
         console.error('[tracker] batch send error for', addr, e);
@@ -354,6 +350,10 @@ export async function startTracker(config: TrackerConfig): Promise<void> {
   if (running) return;
   running = true;
 
+  if (config.intervalMs) {
+    trackingIntervalMs = config.intervalMs;
+  }
+
   // eslint-disable-next-line no-constant-condition
   while (running) {
     try {
@@ -362,7 +362,7 @@ export async function startTracker(config: TrackerConfig): Promise<void> {
       // Keep running even if a poll fails
       console.error('[tracker] poll error:', err);
     }
-    await sleep(config.intervalMs);
+    await sleep(trackingIntervalMs);
   }
 }
 
