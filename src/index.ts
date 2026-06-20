@@ -1,6 +1,6 @@
 import dotenv from 'dotenv';
 import { Client, GatewayIntentBits, Partials, Events, TextChannel } from 'discord.js';
-import { initDb, getDb, closeDb } from './db.js';
+import { initDb, getDb, closeDb, getAllActiveWallets } from './db.js';
 import { handleCommand, commands } from './commands.js';
 import { startTracker, stopTracker } from './tracker.js';
 import { sleep } from './utils.js';
@@ -12,6 +12,8 @@ const DISCORD_CLIENT_ID = process.env.DISCORD_CLIENT_ID!;
 const DISCORD_CHANNEL_ID = process.env.DISCORD_CHANNEL_ID!;
 const TRACKING_INTERVAL = parseInt(process.env.TRACKING_INTERVAL || '60000', 10);
 const MAX_FETCH_ITEMS = parseInt(process.env.MAX_FETCH_ITEMS || '100', 10);
+
+console.log(`🔧 Configured DISCORD_CHANNEL_ID: ${DISCORD_CHANNEL_ID}`);
 
 if (!DISCORD_TOKEN || !DISCORD_CLIENT_ID || !DISCORD_CHANNEL_ID) {
   console.error('Missing required environment variables. Check .env');
@@ -28,13 +30,17 @@ const client = new Client({
 
 let notificationChannel: TextChannel | null = null;
 
-async function sendNotification(message: string) {
+async function sendNotification(payload: string | any) {
   if (!notificationChannel) {
     console.warn('[bot] No notification channel available');
     return;
   }
   try {
-    await notificationChannel.send(message.length > 1900 ? message.slice(0, 1900) + '…' : message);
+    if (typeof payload === 'string') {
+      await notificationChannel.send(payload.length > 1900 ? payload.slice(0, 1900) + '…' : payload);
+    } else {
+      await notificationChannel.send(payload);
+    }
   } catch (e) {
     console.error('[bot] Failed to send notification:', e);
   }
@@ -72,10 +78,15 @@ client.once(Events.ClientReady, async (c) => {
 });
 
 client.on(Events.InteractionCreate, async (interaction) => {
-  if (!interaction.isChatInputCommand()) return;
-
-  // Run command handler
-  await handleCommand(interaction, DISCORD_CHANNEL_ID);
+  if (interaction.isChatInputCommand()) {
+    await handleCommand(interaction, DISCORD_CHANNEL_ID);
+  } else if (interaction.isButton()) {
+    const { handleButton } = await import('./commands.js');
+    await handleButton(interaction);
+  } else if (interaction.isModalSubmit()) {
+    const { handleModal } = await import('./commands.js');
+    await handleModal(interaction);
+  }
 });
 
 client.on(Events.Error, (err) => {
@@ -102,13 +113,24 @@ process.on('SIGTERM', async () => {
 // Boot
 console.log('🚀 Starting PM Wallet Tracker Bot');
 console.log('   • Discord commands: 5 slash commands ready');
-console.log('   • Database: SQLite (tracked_wallets + wallet_events)');
-console.log('   • Tracking engine: polling @polymarket/client SDK');
+console.log('   • Database: SQLite (tracked_wallets + wallet_events) - persistent across restarts');
+console.log('   • Tracking engine: polling @polymarket/client SDK (ONLY official SDK methods)');
 console.log('   • Address resolver: Polymarket profile URLs supported');
 console.log('   • Notifications: will be sent to configured channel');
 
 console.log('Initializing database...');
 initDb();
+
+console.log('Loading tracked wallets from database...');
+const initialWallets = getAllActiveWallets();
+if (initialWallets.length > 0) {
+  console.log(`✅ Loaded ${initialWallets.length} tracked wallet(s) from persistent storage:`);
+  initialWallets.forEach((w: any) => {
+    console.log(`   - ${w.name} (${w.address.slice(0,6)}...${w.address.slice(-4)}) - added by ${w.added_by}`);
+  });
+} else {
+  console.log('   (no wallets currently being tracked)');
+}
 
 console.log('Starting Discord client...');
 client.login(DISCORD_TOKEN).catch(err => {

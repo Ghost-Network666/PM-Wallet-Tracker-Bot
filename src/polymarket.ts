@@ -1,5 +1,5 @@
 import { createPublicClient, type Position, type Trade, type Activity } from '@polymarket/client';
-import { normalizeAddress } from './utils.js';
+import { normalizeAddress, isValidAddress } from './utils.js';
 
 export interface PositionData {
   conditionId: string;
@@ -38,41 +38,28 @@ export interface ActivityData {
   transactionHash?: string | null;
 }
 
-let baseClient: ReturnType<typeof createPublicClient> | null = null;
+let sdkClient: ReturnType<typeof createPublicClient> | null = null;
 
-function getBaseClient() {
-  if (!baseClient) {
-    baseClient = createPublicClient();
+export function getSdkClient() {
+  if (!sdkClient) {
+    sdkClient = createPublicClient();
   }
-  return baseClient;
+  return sdkClient;
 }
 
-// Adapter to exactly match the user-specified SDK usage:
-// client.data.core.getPositions({ user: address })
-export const client = {
-  data: {
-    core: {
-      async getPositions({ user }: { user: string }) {
-        const c = getBaseClient();
-        const paginator = (c as any).listPositions({ user: normalizeAddress(user), pageSize: 200 });
-        const page = await paginator.firstPage();
-        return (page?.items || []) as any[];
-      },
-      async getTrades({ user }: { user: string }) {
-        const c = getBaseClient();
-        const paginator = (c as any).listTrades({ user: normalizeAddress(user), pageSize: 100 });
-        const page = await paginator.firstPage();
-        return (page?.items || []) as any[];
-      },
-      async getActivity({ user }: { user: string }) {
-        const c = getBaseClient();
-        const paginator = (c as any).listActivity({ user: normalizeAddress(user), pageSize: 100 });
-        const page = await paginator.firstPage();
-        return (page?.items || []) as any[];
-      }
-    }
+const marketCache = new Map<string, { data: any; time: number }>();
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
+
+export async function getCachedMarket(params: { slug: string } | { id: string } | { url: string }) {
+  const key = 'slug' in params ? params.slug : 'id' in params ? params.id : params.url;
+  const cached = marketCache.get(key);
+  if (cached && (Date.now() - cached.time < CACHE_TTL_MS)) {
+    return cached.data;
   }
-};
+  const data = await getSdkClient().fetchMarket(params);
+  marketCache.set(key, { data, time: Date.now() });
+  return data;
+}
 
 async function fetchFirstPage<T>(paginator: any): Promise<T[]> {
   try {
@@ -86,8 +73,10 @@ async function fetchFirstPage<T>(paginator: any): Promise<T[]> {
 
 export async function fetchPositions(address: string, pageSize = 100): Promise<PositionData[]> {
   const addr = normalizeAddress(address);
+  const client = getSdkClient();
   try {
-    const raw = await client.data.core.getPositions({ user: addr });
+    const paginator = client.listPositions({ user: addr, pageSize });
+    const raw = await fetchFirstPage<any>(paginator);
     return raw.map((p: any) => ({
       conditionId: p.conditionId,
       tokenId: p.tokenId ?? null,
@@ -108,8 +97,10 @@ export async function fetchPositions(address: string, pageSize = 100): Promise<P
 
 export async function fetchTrades(address: string, pageSize = 50): Promise<TradeData[]> {
   const addr = normalizeAddress(address);
+  const client = getSdkClient();
   try {
-    const raw = await client.data.core.getTrades({ user: addr });
+    const paginator = client.listTrades({ user: addr, pageSize });
+    const raw = await fetchFirstPage<any>(paginator);
     return raw.map((t: any) => ({
       side: t.side ?? null,
       size: t.size ?? null,
@@ -127,8 +118,10 @@ export async function fetchTrades(address: string, pageSize = 50): Promise<Trade
 
 export async function fetchActivity(address: string, pageSize = 50): Promise<ActivityData[]> {
   const addr = normalizeAddress(address);
+  const client = getSdkClient();
   try {
-    const raw = await client.data.core.getActivity({ user: addr });
+    const paginator = client.listActivity({ user: addr, pageSize });
+    const raw = await fetchFirstPage<any>(paginator);
     return raw.map((a: any) => ({
       type: a.type ?? 'UNKNOWN',
       timestamp: a.timestamp ?? Date.now(),
@@ -155,21 +148,33 @@ export async function fetchWalletSnapshot(address: string) {
     fetchTrades(address),
     fetchActivity(address),
   ]);
-  return { positions, trades, activity };
+
+  let portfolioValue: any = null;
+  try {
+    const pv = await getSdkClient().fetchPortfolioValue({ user: address });
+    portfolioValue = pv;
+  } catch (e) {
+    // ignore
+  }
+
+  return { positions, trades, activity, portfolioValue };
 }
 
 /**
- * Resolve username -> address.
- * Prefers the official SDK search (Gamma-backed).
- * Falls back to direct Gamma public-search (as allowed for profile URL resolution).
+ * Resolve username -> address using ONLY the official SDK (search).
+ * No custom/third-party APIs for resolution.
  */
 export async function resolveUsernameToAddress(username: string): Promise<string | null> {
-  const clean = username.replace(/^@/, '').trim();
+  let clean = username.replace(/^@/, '').trim();
   if (!clean) return null;
 
-  const c = getBaseClient();
+  // If it's already a valid address, just return it (on-chain verification)
+  if (isValidAddress(clean)) {
+    return normalizeAddress(clean);
+  }
 
-  // 1. Try via official SDK search (preferred)
+  const c = getSdkClient();
+
   try {
     const results = await c.search({ q: clean, pageSize: 5 });
     const firstPage = await results.firstPage();
@@ -180,26 +185,8 @@ export async function resolveUsernameToAddress(username: string): Promise<string
         return normalizeAddress(addr);
       }
     }
-  } catch {
-    // continue to fallback
-  }
-
-  // 2. Direct Gamma API fallback (public-search) - for profile URL resolution
-  try {
-    const url = `https://gamma-api.polymarket.com/public-search?q=${encodeURIComponent(clean)}&search_profiles=true&limit_per_type=3`;
-    const res = await fetch(url, { headers: { 'User-Agent': 'PM-Wallet-Tracker-Bot' } });
-    if (res.ok) {
-      const data: any = await res.json();
-      const profiles = data?.profiles || data?.items?.profiles || [];
-      for (const p of profiles) {
-        const addr = p?.proxyWallet || p?.wallet || p?.address;
-        if (typeof addr === 'string' && addr.length === 42) {
-          return normalizeAddress(addr);
-        }
-      }
-    }
-  } catch {
-    // ignore network issues
+  } catch (e) {
+    console.error('[resolve] SDK search failed for:', clean, e);
   }
 
   return null;
