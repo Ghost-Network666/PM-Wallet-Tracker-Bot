@@ -11,6 +11,7 @@ export interface PositionData {
   realizedPnl?: string | null;
   title?: string | null;
   slug?: string | null;
+  url?: string | null;
   outcome?: string | null;
   outcomeIndex?: number | null;
 }
@@ -22,6 +23,7 @@ export interface TradeData {
   timestamp?: number | null;
   title?: string | null;
   slug?: string | null;
+  url?: string | null;
   outcome?: string | null;
   transactionHash?: string | null;
 }
@@ -35,6 +37,7 @@ export interface ActivityData {
   shares?: string | null;
   price?: string | null;
   slug?: string | null;
+  url?: string | null;
   transactionHash?: string | null;
 }
 
@@ -77,7 +80,7 @@ export async function fetchPositions(address: string, pageSize = 100): Promise<P
   try {
     const paginator = client.listPositions({ user: addr, pageSize });
     const raw = await fetchFirstPage<any>(paginator);
-    return raw.map((p: any) => ({
+    const items = raw.map((p: any) => ({
       conditionId: p.conditionId,
       tokenId: p.tokenId ?? null,
       size: p.size ?? null,
@@ -87,9 +90,20 @@ export async function fetchPositions(address: string, pageSize = 100): Promise<P
       realizedPnl: p.realizedPnl ?? null,
       title: p.title ?? null,
       slug: p.slug ?? null,
+      url: null,
       outcome: p.outcome ?? null,
       outcomeIndex: p.outcomeIndex ?? null,
     }));
+    // Enrich with official SDK url using only SDK call + slug param
+    await Promise.all(items.map(async (item) => {
+      if (item.slug) {
+        try {
+          const m = await getCachedMarket({ slug: item.slug });
+          item.url = m?.url ?? null;
+        } catch {}
+      }
+    }));
+    return items;
   } catch {
     return [];
   }
@@ -101,16 +115,27 @@ export async function fetchTrades(address: string, pageSize = 50): Promise<Trade
   try {
     const paginator = client.listTrades({ user: addr, pageSize });
     const raw = await fetchFirstPage<any>(paginator);
-    return raw.map((t: any) => ({
+    const items = raw.map((t: any) => ({
       side: t.side ?? null,
       size: t.size ?? null,
       price: t.price ?? null,
       timestamp: t.timestamp ?? null,
       title: t.title ?? null,
       slug: t.slug ?? null,
+      url: null,
       outcome: t.outcome ?? null,
       transactionHash: t.transactionHash ?? null,
     }));
+    // Enrich with official SDK url using only SDK call + slug param
+    await Promise.all(items.map(async (item) => {
+      if (item.slug) {
+        try {
+          const m = await getCachedMarket({ slug: item.slug });
+          item.url = m?.url ?? null;
+        } catch {}
+      }
+    }));
+    return items;
   } catch {
     return [];
   }
@@ -122,7 +147,7 @@ export async function fetchActivity(address: string, pageSize = 50): Promise<Act
   try {
     const paginator = client.listActivity({ user: addr, pageSize });
     const raw = await fetchFirstPage<any>(paginator);
-    return raw.map((a: any) => ({
+    const items = raw.map((a: any) => ({
       type: a.type ?? 'UNKNOWN',
       timestamp: a.timestamp ?? Date.now(),
       title: a.title ?? null,
@@ -131,8 +156,19 @@ export async function fetchActivity(address: string, pageSize = 50): Promise<Act
       shares: a.shares ?? null,
       price: a.price ?? null,
       slug: a.slug ?? null,
+      url: null,
       transactionHash: a.transactionHash ?? null,
     }));
+    // Enrich with official SDK url using only SDK call + slug param
+    await Promise.all(items.map(async (item) => {
+      if (item.slug) {
+        try {
+          const m = await getCachedMarket({ slug: item.slug });
+          item.url = m?.url ?? null;
+        } catch {}
+      }
+    }));
+    return items;
   } catch {
     return [];
   }

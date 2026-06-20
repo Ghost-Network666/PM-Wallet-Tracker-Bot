@@ -6,36 +6,39 @@ No third-party APIs for data fetching. No web scraping.
 
 ## Features
 
-- Slash commands for wallet management
-- Local SQLite storage
-- Background polling (default every 60s)
-- Change detection for:
-  - New / closed positions
-  - New trades
-  - New activity events (splits, merges, rewards, etc.)
-- Clean Discord embed for `/wallet-stats` and list
-- Notifications sent to a dedicated channel
+- **Strictly official SDK only** (`@polymarket/client`): listPositions, listTrades, listActivity, fetchMarket, fetchPortfolioValue etc. No third-party APIs.
+- Per-wallet settings (min trade/impact size, side filter BUY/SELL/ALL, first-time market alerts).
+- Spam-resistant: event deduplication (tx + composite keys), history backfill on add, batched notifications.
+- Live /list-wallets with Portfolio Value (SDK + positions fallback), Unrealized/Realized PnL, open positions + est. current values.
+- Position open/close detection with clean plain-text alerts.
+- All notifications include **SDK-sourced Polymarket market link** + on-chain tx link.
+- Compact formatting, trimmed decimals, structured embeds.
+- Leaderboard, combined portfolio, export/import, detailed stats with filters.
 
-## Commands the Bot Will Support
+## Commands
 
-| Command | Description |
-|---------|-------------|
-| /add-wallet | Add a wallet by address or Polymarket URL |
-| /remove-wallet | Remove a tracked wallet |
-| /rename-wallet | Rename a tracked wallet |
-| /list-wallets | List all tracked wallets |
-| /wallet-stats | Show detailed stats for a wallet |
+| Command              | Description |
+|----------------------|-------------|
+| `/add-wallet`        | Add a wallet (by 0x or @username/profile URL). Supports optional name, min_size, side filter, first_time notifications. |
+| `/remove-wallet`     | Remove a tracked wallet |
+| `/rename-wallet`     | Rename a tracked wallet |
+| `/list-wallets`      | List **all** tracked wallets with live Portfolio, Unrealized/Realized PnL, open positions summary (clean & sorted). |
+| `/wallet-stats`      | Detailed view for one wallet (positions, trades, activity, filters by days/type). |
+| `/leaderboard`       | Rank wallets by realized PnL from activity. |
+| `/combined-portfolio`| Sum portfolio values across all tracked wallets. |
+| `/export-wallets`    | Export tracked wallets as JSON file. |
+| `/import-wallets`    | Import wallets from JSON. |
 
 ## Components
 
 | Component         | Description |
 |-------------------|-------------|
-| Discord commands  | All 5 slash commands with proper handlers |
-| Database          | SQLite with tracked wallets and event history |
-| Tracking engine   | Polls SDK every 60s, detects changes, sends notifications |
-| Formatters        | Human-readable output with emojis |
-| Configuration     | `.env` with Discord token, channel ID, interval |
-| Address resolver  | Extracts address from Polymarket profile URLs |
+| Discord commands  | Structured handlers + registry for clean dispatch (add/remove/rename/list/stats/leaderboard/etc.) |
+| Database          | SQLite (tracked_wallets + wallet_events + market interactions for dedup) |
+| Tracking engine   | Polling + diff detection + batched notifications (only official SDK) |
+| Formatters        | Centralized in utils (compact PnL, clean titles, SDK links) |
+| Configuration     | .env + per-wallet settings persisted in DB |
+| Market links      | Always from SDK fetchMarket({slug}) — no hardcoded URLs |
 
 The bot will start tracking wallets immediately after you add them and send notifications to your Discord channel whenever tracked wallets make moves.
 

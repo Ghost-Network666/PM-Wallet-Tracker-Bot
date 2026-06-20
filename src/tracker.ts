@@ -1,6 +1,14 @@
 import { getAllActiveWallets, updateWalletHashes, recordEvent, getUnnotifiedEvents, markEventsNotified, getWalletByAddress, getWalletSettings, hasSeenMarket, markMarketSeen, hasEventWithTx, hasSeenEvent } from './db.js';
 import { fetchWalletSnapshot, getCachedMarket } from './polymarket.js';
 import { hashState, shortText, sleep, formatPnL, formatSide, formatDate, formatPrice, truncateAddress, formatDecimal, getEventDedupKey } from './utils.js';
+
+function buildLinks(data: any): string {
+  const pm = data.url;
+  const tx = data.transactionHash ? `https://polygonscan.com/tx/${data.transactionHash}` : '';
+  return [pm ? `[🔗 Polymarket](${pm})` : '', tx ? `[⛓️ on-chain](${tx})` : '']
+    .filter(Boolean)
+    .join(' • ') || 'N/A';
+}
 import { EmbedBuilder } from 'discord.js';
 
 export interface TrackerConfig {
@@ -73,7 +81,8 @@ function formatPositionChange(type: 'new' | 'closed', pos: any): string {
   const avg = pos.avgPrice ? ` | Avg ${formatPrice(pos.avgPrice, true)}` : '';
   const cur = pos.curPrice ? ` | Cur ${formatPrice(pos.curPrice, true)}` : '';
   const pnl = pos.cashPnl != null ? ` | PnL: ${formatPnL(pos.cashPnl)}` : '';
-  return `${emoji} **${label}**: **${title}**${outcome}${size}${avg}${cur}${pnl}`;
+  const linkPart = buildLinks(pos) !== 'N/A' ? ` | ${buildLinks(pos)}` : '';
+  return `${emoji} **${label}**: **${title}**${outcome}${size}${avg}${cur}${pnl}${linkPart}`;
 }
 
 export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
@@ -101,14 +110,20 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
               const sz = parseFloat(pos.size || '0');
               const est = sz * (1 - avg);
               const emoji = est > 0 ? '🟢' : '🔴';
+              let marketData: any = null;
+              if (!pos.url && pos.slug) {
+                marketData = await getCachedMarket({ slug: pos.slug }).catch(() => null);
+              }
+              const pm: string = String(pos.url || (marketData && marketData.url) || '');
               const resEmbed = new EmbedBuilder()
                 .setTitle(`🏆 Market Resolved!`)
                 .setDescription(`**${market.question || pos.title}** resolved.`)
                 .addFields(
                   { name: 'Wallet Position', value: `${formatDecimal(sz)} @ ${formatPrice(avg, true)}`, inline: false },
-                  { name: 'Est. if redeem now', value: `${emoji} ${formatPnL(est)}` }
+                  { name: 'Est. if redeem now', value: `${emoji} ${formatPnL(est)}` },
+                  { name: 'Links', value: pm ? `[🔗 Polymarket](${pm})` : 'N/A' }
                 )
-                .setFooter({ text: 'Pre-emptive alert via official SDK' });
+                .setFooter({ text: 'via official @polymarket/client SDK' });
               await config.sendNotification({ embeds: [resEmbed] });
               resolvedAlerted.add(key);
             }
@@ -267,16 +282,17 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
           const embed = new EmbedBuilder()
             .setTitle(title)
             .setColor(getColorForType(ev.event_type))
-            .setTimestamp();
+            .setTimestamp()
+            .setFooter({ text: 'via official @polymarket/client SDK' });
 
           if (ev.event_type === 'trade') {
             const t = data;
             const value = (t.size && t.price) ? parseFloat(t.size) * parseFloat(t.price) : 0;
             embed.addFields(
-              { name: 'Market', value: t.title || 'Unknown', inline: false },
+              { name: 'Market', value: t.title || t.slug || 'Unknown market', inline: false },
               { name: 'Outcome', value: t.outcome || 'N/A', inline: true },
-              { name: 'Details', value: `${formatSide(t.side)} ${formatDecimal(t.size)} @ ${formatPrice(t.price, true)} (value ≈ ${formatPnL(value)})`, inline: true },
-              { name: 'Link', value: t.transactionHash ? `[🔗 on-chain](https://polygonscan.com/tx/${t.transactionHash})` : 'N/A' }
+              { name: 'Details', value: `${formatSide(t.side)} ${formatDecimal(t.size)} @ ${formatPrice(t.price, true)} (≈ ${formatPnL(value).replace(/^[^\$]+/, '')})`, inline: true },
+              { name: 'Links', value: buildLinks(t) }
             );
             embeds.push(embed);
           } else if (ev.event_type === 'activity') {
@@ -286,17 +302,17 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
             const amt = a.amount ? formatPnL(a.amount) : '';
             embed.setTitle(title); // refresh with better type
             embed.addFields(
-              { name: 'Market', value: a.title || 'Unknown', inline: false },
+              { name: 'Market', value: a.title || a.slug || 'Unknown market', inline: false },
               { name: 'Impact', value: amt, inline: true },
-              { name: 'Link', value: a.transactionHash ? `[🔗 on-chain](https://polygonscan.com/tx/${a.transactionHash})` : 'N/A' }
+              { name: 'Links', value: buildLinks(a) }
             );
             embeds.push(embed);
           } else if (ev.event_type === 'first_time') {
             const a = data;
             embed.addFields(
-              { name: 'Market', value: a.title || a.slug || 'Unknown', inline: false },
+              { name: 'Market', value: a.title || a.slug || 'Unknown market', inline: false },
               { name: 'Type', value: a.type || 'first_time', inline: true },
-              { name: 'Link', value: a.transactionHash ? `[🔗 on-chain](https://polygonscan.com/tx/${a.transactionHash})` : 'N/A' }
+              { name: 'Links', value: buildLinks(a) }
             );
             embeds.push(embed);
           } else {
