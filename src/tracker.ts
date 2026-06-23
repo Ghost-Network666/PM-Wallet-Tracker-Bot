@@ -1,5 +1,5 @@
 import { getAllActiveWallets, updateWalletHashes, recordEvent, getUnnotifiedEvents, markEventsNotified, getWalletByAddress, getWalletSettings, hasSeenMarket, markMarketSeen, hasEventWithTx, hasSeenEvent } from './db.js';
-import { fetchWalletSnapshot, getCachedMarket } from './polymarket.js';
+import { fetchWalletSnapshot } from './polymarket.js';
 import { hashState, shortText, sleep, formatPnL, formatSide, formatDate, formatPrice, truncateAddress, formatDecimal, getEventDedupKey } from './utils.js';
 
 function buildLinks(data: any): string {
@@ -82,53 +82,63 @@ function detectNewActivity(prev: any[], current: any[]): any[] {
   return current.filter(a => !prevKeys.has(getEventDedupKey(a, 'activity')));
 }
 
-function formatPositionChange(type: 'new' | 'closed', pos: any): string {
+function fieldForPositionChange(type: 'new' | 'closed', pos: any): { name: string; value: string } {
   const emoji = type === 'new' ? '🟢' : '🔴';
-  const label = type === 'new' ? 'New position opened' : 'Position closed';
-  const title = shortText(pos.title || pos.slug || 'Unknown market', 55);
+  const label = type === 'new' ? 'New Position' : 'Position Closed';
+  const title = shortText(pos.title || pos.slug || 'Unknown market', 90);
   const outcome = pos.outcome ? ` (${pos.outcome})` : '';
-  const size = pos.size ? ` | Size: ${formatDecimal(pos.size)}` : '';
-  const avg = pos.avgPrice ? ` | Avg ${formatPrice(pos.avgPrice, true)}` : '';
-  const cur = pos.curPrice ? ` | Cur ${formatPrice(pos.curPrice, true)}` : '';
-  const pnl = pos.cashPnl != null ? ` | PnL: ${formatPnL(pos.cashPnl)}` : '';
-  const linkPart = buildLinks(pos) !== 'N/A' ? ` | ${buildLinks(pos)}` : '';
-  return `${emoji} ${label}: ${title}${outcome}${size}${avg}${cur}${pnl}${linkPart}`;
+  const parts: string[] = [];
+  if (pos.size) parts.push(`Size: ${formatDecimal(pos.size)}`);
+  if (pos.avgPrice) parts.push(`Avg ${formatPrice(pos.avgPrice, true)}`);
+  if (pos.curPrice) parts.push(`Cur ${formatPrice(pos.curPrice, true)}`);
+  if (pos.cashPnl != null) parts.push(`PnL: ${formatPnL(pos.cashPnl)}`);
+  return {
+    name: `${emoji} ${label} — ${title}${outcome}`,
+    value: `${parts.join(' • ') || '—'}\n${buildLinks(pos)}`,
+  };
 }
 
-function formatCompactActivity(data: any): string {
+function fieldForActivity(data: any): { name: string; value: string } {
   const niceType = (data.type || 'EVENT').toUpperCase();
   const emoji = getActionEmoji(niceType);
-  const title = shortText(data.title || data.slug || (niceType === 'MAKER_REBATE' ? 'Maker Rebate' : 'Unknown market'), 50);
-  let extra = data.amount ? ` ${formatPnL(data.amount)}` : '';
+  const title = shortText(data.title || data.slug || (niceType === 'MAKER_REBATE' ? 'Maker Rebate' : 'Unknown market'), 90);
+  const parts: string[] = [];
+  if (data.amount) parts.push(formatPnL(data.amount));
   if (data.side && data.size && data.price) {
     const prob = (parseFloat(data.price) * 100).toFixed(2);
-    extra += ` ${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) ${formatSide(data.side)}`;
+    parts.push(`${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) ${formatSide(data.side)}`);
   }
-  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
-  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
-  return `${emoji} ${niceType} — ${title}${extra}${time}${links}`;
+  const time = data.timestamp ? formatDate(data.timestamp) : '';
+  return {
+    name: `${emoji} ${niceType} — ${title}`,
+    value: `${parts.join(' • ') || '—'}\n${[time, buildLinks(data)].filter(Boolean).join(' • ')}`,
+  };
 }
 
-function formatCompactTrade(data: any): string {
+function fieldForTrade(data: any): { name: string; value: string } {
   const side = formatSide(data.side);
-  const title = shortText(data.title || data.slug || 'Unknown market', 50);
-  const outcome = data.outcome ? ` ${data.outcome}` : '';
-  let extra = '';
+  const title = shortText(data.title || data.slug || 'Unknown market', 90);
+  const outcome = data.outcome ? ` (${data.outcome})` : '';
+  let detail = '—';
   if (data.size && data.price) {
     const value = parseFloat(data.size) * parseFloat(data.price);
     const prob = (parseFloat(data.price) * 100).toFixed(2);
-    extra = ` ${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) (≈ ${formatPnL(value).replace(/^[^\$]+/, '')}) ${side}`;
+    detail = `${side} ${formatDecimal(data.size)} @ ${formatPrice(data.price, true)} (${prob}%) ≈ ${formatPnL(value).replace(/^[^\$]+/, '')}`;
   }
-  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
-  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
-  return `📈 TRADE — ${title}${outcome}${extra}${time}${links}`;
+  const time = data.timestamp ? formatDate(data.timestamp) : '';
+  return {
+    name: `📈 TRADE — ${title}${outcome}`,
+    value: `${detail}\n${[time, buildLinks(data)].filter(Boolean).join(' • ')}`,
+  };
 }
 
-function formatCompactFirstTime(data: any): string {
-  const title = shortText(data.title || data.slug || 'Unknown market', 50);
-  const time = data.timestamp ? ` • ${formatDate(data.timestamp)}` : '';
-  const links = buildLinks(data) !== 'N/A' ? ` ${buildLinks(data)}` : '';
-  return `🆕 FIRST TIME — ${title}${time}${links}`;
+function fieldForFirstTime(data: any): { name: string; value: string } {
+  const title = shortText(data.title || data.slug || 'Unknown market', 90);
+  const time = data.timestamp ? formatDate(data.timestamp) : '';
+  return {
+    name: `🆕 FIRST TIME — ${title}`,
+    value: `${[time, buildLinks(data)].filter(Boolean).join(' • ')}`,
+  };
 }
 
 export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
@@ -142,39 +152,29 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
   for (const wallet of wallets) {
     const snapshot = await fetchWalletSnapshot(wallet.address);
 
-    // Resolution predictor (pre-emptive PnL)
+    // Resolution predictor: uses the SDK's own `redeemable` flag and `cashPnl` on each
+    // Position (both sourced directly from listPositions) — no market-fetching or custom PnL math.
     for (const pos of snapshot.positions || []) {
       const slug = pos.slug;
-      if (slug) {
-        try {
-          const market = await getCachedMarket({ slug });
-          const isResolved = market.resolution && (market.resolution.resolved || (market.state && market.state.resolved));
-          if (isResolved) {
-            const key = `${wallet.address}:${slug}`;
-            if (!resolvedAlerted.has(key)) {
-              const avg = parseFloat(pos.avgPrice || '0');
-              const sz = parseFloat(pos.size || '0');
-              const est = sz * (1 - avg);
-              const emoji = est > 0 ? '🟢' : '🔴';
-              let marketData: any = null;
-              if (!pos.url && pos.slug) {
-                marketData = await getCachedMarket({ slug: pos.slug }).catch(() => null);
-              }
-              const pm: string = String(pos.url || (marketData && marketData.url) || '');
-              const resEmbed = new EmbedBuilder()
-                .setTitle(`🏆 Market Resolved!`)
-                .setDescription(`**${market.question || pos.title}** resolved.`)
-                .addFields(
-                  { name: 'Wallet Position', value: `${formatDecimal(sz)} @ ${formatPrice(avg, true)}`, inline: false },
-                  { name: 'Est. if redeem now', value: `${emoji} ${formatPnL(est)}` },
-                  { name: 'Links', value: pm ? `[🔗 Polymarket](${pm})` : 'N/A' }
-                )
-                .setFooter({ text: 'via official @polymarket/client SDK' });
-              await config.sendNotification({ embeds: [resEmbed] });
-              resolvedAlerted.add(key);
-            }
-          }
-        } catch {}
+      if (slug && pos.redeemable) {
+        const key = `${wallet.address}:${slug}`;
+        if (!resolvedAlerted.has(key)) {
+          const avg = parseFloat(pos.avgPrice || '0');
+          const sz = parseFloat(pos.size || '0');
+          const est = parseFloat(pos.cashPnl || '0') || 0;
+          const emoji = est > 0 ? '🟢' : '🔴';
+          const resEmbed = new EmbedBuilder()
+            .setTitle(`🏆 Market Resolved!`)
+            .setDescription(`**${pos.title || slug}** resolved.`)
+            .addFields(
+              { name: 'Wallet Position', value: `${formatDecimal(sz)} @ ${formatPrice(avg, true)}`, inline: false },
+              { name: 'Est. if redeem now', value: `${emoji} ${formatPnL(est)}` },
+              { name: 'Links', value: pos.url ? `[🔗 Polymarket](${pos.url})` : 'N/A' }
+            )
+            .setFooter({ text: 'via official @polymarket/client SDK' });
+          await config.sendNotification({ embeds: [resEmbed] });
+          resolvedAlerted.add(key);
+        }
       }
     }
 
@@ -286,7 +286,8 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
   }
 
   // Dispatch notifications for any recorded events
-  // BATCHED: group by wallet and send fewer messages (big reduction in channel flood)
+  // BATCHED: one rich embed per wallet per cycle. Using embeds (not raw links in plain text)
+  // avoids Discord auto-unfurling every polygonscan tx link into its own giant preview card.
   const pending = getUnnotifiedEvents();
   if (pending.length > 0) {
     console.log(`[tracker] Detected ${pending.length} change event(s) - sending batched notifications...`);
@@ -297,46 +298,63 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
       byWallet.get(ev.wallet_address)!.push(ev);
     }
 
+    const MAX_FIELDS = 10;
+
     for (const [addr, evs] of byWallet.entries()) {
       const w = getWalletByAddress(addr);
       const short = truncateAddress(addr);
-      const displayBase = w ? (w.name && w.name.includes('...') ? w.name : `${w.name}`) : short;
+      const displayName = w && w.name && !w.name.startsWith('Unnamed') ? w.name : short;
 
-      const plainMessages: string[] = [];
+      const fields: { name: string; value: string }[] = [];
+      let overflowCount = 0;
+      let compositeType = '';
 
       for (const ev of evs) {
         try {
           const data = JSON.parse(ev.event_data);
-          const prefix = w && w.name && w.name.startsWith('Unnamed') ? short : `${displayBase} (${short})`;
+          compositeType += ` ${ev.event_type} ${data.side || ''}`;
 
-          let msg = '';
-          if (ev.event_type === 'position_new' || ev.event_type === 'position_closed') {
-            const p = data;
-            msg = formatPositionChange(ev.event_type === 'position_new' ? 'new' : 'closed', { ...p, title: p.title || p.slug });
-          } else if (ev.event_type === 'trade') {
-            msg = formatCompactTrade(data);
-          } else if (ev.event_type === 'activity') {
-            msg = formatCompactActivity(data);
-          } else if (ev.event_type === 'first_time') {
-            msg = formatCompactFirstTime(data);
-          } else {
-            msg = `📌 ${ev.event_type.toUpperCase()}`;
+          if (fields.length >= MAX_FIELDS) {
+            overflowCount++;
+            continue;
           }
 
-          plainMessages.push(`${prefix}\n${msg}`);
+          let field: { name: string; value: string };
+          if (ev.event_type === 'position_new' || ev.event_type === 'position_closed') {
+            field = fieldForPositionChange(ev.event_type === 'position_new' ? 'new' : 'closed', { ...data, title: data.title || data.slug });
+          } else if (ev.event_type === 'trade') {
+            field = fieldForTrade(data);
+          } else if (ev.event_type === 'activity') {
+            field = fieldForActivity(data);
+          } else if (ev.event_type === 'first_time') {
+            field = fieldForFirstTime(data);
+          } else {
+            field = { name: `📌 ${ev.event_type.toUpperCase()}`, value: '—' };
+          }
+          fields.push(field);
         } catch {
-          // ignore malformed
+          // ignore malformed event payloads
         }
       }
 
-      // Send batched for this wallet as clean compact text (one message per wallet for skimmability)
+      if (overflowCount > 0) {
+        fields.push({
+          name: `➕ ${overflowCount} more update${overflowCount > 1 ? 's' : ''}`,
+          value: `Use \`/wallet-stats\` for the full history.`,
+        });
+      }
+
+      if (fields.length === 0) continue;
+
+      const embed = new EmbedBuilder()
+        .setTitle(`${displayName}${displayName !== short ? ` (${short})` : ''}`)
+        .setColor(getColorForType(compositeType.toLowerCase()))
+        .addFields(fields)
+        .setFooter({ text: `via official @polymarket/client SDK • ${evs.length} update${evs.length > 1 ? 's' : ''}` })
+        .setTimestamp();
+
       try {
-        if (plainMessages.length > 0) {
-          const header = plainMessages.length > 1 ? `**${displayBase}** — ${plainMessages.length} updates` : '';
-          const body = plainMessages.join('\n\n');
-          const fullMsg = header ? `${header}\n${body}` : body;
-          await config.sendNotification(fullMsg.length > 1900 ? fullMsg.slice(0, 1900) + '…' : fullMsg);
-        }
+        await config.sendNotification({ embeds: [embed] });
       } catch (e) {
         console.error('[tracker] batch send error for', addr, e);
       }

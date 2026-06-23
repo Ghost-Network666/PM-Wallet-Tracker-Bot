@@ -166,54 +166,6 @@ export function getEventDedupKey(item: any, typeHint = ''): string {
   return `${t}:${ts}:${slug}:${val}`.slice(0, 180);
 }
 
-/** Compute net realized PnL preferring position realizedPnl + positive activity */
-export function computeNetRealized(positions: any[], activity: any[]): number {
-  let fromPositions = 0;
-  for (const p of positions || []) {
-    fromPositions += parseFloat(p.realizedPnl || '0') || 0;
-  }
-  let fromActivity = 0;
-  for (const a of activity || []) {
-    const v = parseFloat(a.amount || '0') || 0;
-    if (v > 0) fromActivity += v;
-  }
-  return fromPositions + fromActivity;
-}
-
-/** Rough win-rate proxy: positive realized / (positive + abs(negative)) from available data */
-export function computeRoughWinRate(positions: any[], activity: any[]): number {
-  let pos = 0, neg = 0;
-  for (const p of positions || []) {
-    const r = parseFloat(p.realizedPnl || '0') || 0;
-    if (r > 0) pos += r;
-    else neg += Math.abs(r);
-  }
-  for (const a of activity || []) {
-    const v = parseFloat(a.amount || '0') || 0;
-    if (v > 0) pos += v;
-    else neg += Math.abs(v);
-  }
-  const total = pos + neg;
-  return total > 0 ? pos / total : 0;
-}
-
-/** Approximate total volume from activity (sum of abs amounts) */
-export function computeApproxVolume(activity: any[]): number {
-  let vol = 0;
-  for (const a of activity || []) {
-    vol += Math.abs(parseFloat(a.amount || '0') || 0);
-  }
-  return vol;
-}
-
-/** Simple whale/activity score: volume + trade count + position count (heuristic) */
-export function computeActivityScore(positions: any[], trades: any[], activity: any[]): number {
-  const vol = computeApproxVolume(activity);
-  const tradeCount = (trades || []).length;
-  const posCount = (positions || []).length;
-  return vol * 0.01 + tradeCount * 10 + posCount * 5; // tunable heuristic
-}
-
 /**
  * Robustly extract numeric portfolio value from SDK response.
  * Handles different shapes returned by fetchPortfolioValue.

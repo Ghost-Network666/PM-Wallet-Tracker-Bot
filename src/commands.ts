@@ -12,8 +12,8 @@ import {
   type ModalSubmitInteraction,
 } from 'discord.js';
 import { addWallet, removeWallet, renameWallet, listWallets, getWalletByNameOrAddress, updateWalletHashes, getWalletByAddress, updateWalletSettings, backfillSeenEvent } from './db.js';
-import { fetchWalletSnapshot, resolveUsernameToAddress, getSdkClient } from './polymarket.js';
-import { isValidAddress, parseWalletIdentifier, truncateAddress, shortText, formatPnL, formatPrice, formatDecimal, formatDate, formatSide, hashState, normalizeAddress, getEventDedupKey, cleanMarketTitle, formatPositionsForEmbed, formatTradesForEmbed, formatActivityForEmbed, getPortfolioValue, computeNetRealized, computeRoughWinRate, computeApproxVolume, computeActivityScore } from './utils.js';
+import { fetchWalletSnapshot, resolveUsernameToAddress, getSdkClient, fetchWalletAnalytics, fetchPositions, fetchTrades, fetchActivity, fetchClosedPositions, fetchProfile } from './polymarket.js';
+import { isValidAddress, parseWalletIdentifier, truncateAddress, shortText, formatPnL, formatPrice, formatDecimal, formatDate, formatSide, hashState, normalizeAddress, getEventDedupKey, cleanMarketTitle, formatPositionsForEmbed, formatTradesForEmbed, formatActivityForEmbed, getPortfolioValue } from './utils.js';
 import { primeWalletForMonitoring, getTrackingInterval, setTrackingInterval } from './tracker.js';
 
 export const commands = [
@@ -220,7 +220,13 @@ async function handleAddWallet(interaction: ChatInputCommandInteraction) {
 
   const addedBy = interaction.user.id;
   const providedName = interaction.options.getString('name');
-  const defaultName = providedName ? providedName.trim() : truncateAddress(address);
+  // If no name was given, ask the SDK's own public profile for this wallet's
+  // display name/pseudonym before falling back to a truncated address.
+  let defaultName = providedName ? providedName.trim() : '';
+  if (!defaultName) {
+    const profile = await fetchProfile(address);
+    defaultName = profile?.pseudonym || profile?.name || truncateAddress(address);
+  }
   const wallet = addWallet(address, defaultName, addedBy);
 
   const minSize = interaction.options.getNumber('min_size') || 0;
@@ -413,19 +419,28 @@ async function handleListWallets(interaction: ChatInputCommandInteraction) {
 
     let portVal = 'N/A';
     let unrealStr = '⚪ $0.00';
-    let realizedStr = '⚪ $0.00';
     let posSummary = 'No open positions';
     let openCount = 0;
     let portRaw = 0;
     let unrealRaw = 0;
-    let realizedRaw = 0;
-    let netRealized = 0;
+    let pnl = 0;
     let winRate = 0;
     let volume = 0;
-    let score = 0;
+    let rank: string | null = null;
+    let verifiedBadge = false;
+    let marketsTraded = 0;
 
     try {
-      const snap = await fetchWalletSnapshot(w.address);
+      const [snap, analytics] = await Promise.all([
+        fetchWalletSnapshot(w.address),
+        fetchWalletAnalytics(w.address),
+      ]);
+      pnl = analytics.pnl;
+      winRate = analytics.winRate;
+      volume = analytics.volume;
+      rank = analytics.rank;
+      verifiedBadge = analytics.verifiedBadge;
+      marketsTraded = analytics.marketsTraded;
 
       // Open positions first (used for portfolio fallback too)
       const positions = snap.positions || [];
@@ -464,35 +479,18 @@ async function handleListWallets(interaction: ChatInputCommandInteraction) {
       if (sdkPort > 0 && estFromPositions > 0) {
         // Could log diff, but for display use SDK as primary
       }
-
-      // Realized PnL approximated from positive amounts in activity
-      realizedRaw = 0;
-      (snap.activity || []).forEach((a: any) => {
-        if (a.amount) {
-          const v = parseFloat(a.amount) || 0;
-          if (v > 0) realizedRaw += v;
-        }
-      });
-      realizedStr = formatPnL(realizedRaw);
-
-      // Additional analytics using SDK data only
-      const netRealized = computeNetRealized(positions, snap.activity || []);
-      const winRate = computeRoughWinRate(positions, snap.activity || []);
-      const volume = computeApproxVolume(snap.activity || []);
-      const score = computeActivityScore(positions, snap.trades || [], snap.activity || []);
     } catch (e) {
       posSummary = '⚠️ Could not fetch latest details';
     }
 
-    return { name: w.name, addr, last, portVal, unrealStr, realizedStr, openCount, posSummary, portRaw, unrealRaw, realizedRaw, netRealized, winRate, volume, score };
+    return { name: w.name, addr, last, portVal, unrealStr, openCount, posSummary, portRaw, unrealRaw, pnl, winRate, volume, rank, verifiedBadge, marketsTraded };
   }));
 
-  // Sort by open positions desc, then by realized+unrealized (use raw for accuracy)
+  // Sort by open positions desc, then by SDK leaderboard PnL
   const parsedEnriched = enriched.map(it => {
     const portR = (it as any).portRaw || 0;
-    const scoreR = (it as any).score || 0;
-    const netR = (it as any).netRealized || 0;
-    return { ...it, _score: it.openCount * 1000 + netR + scoreR * 0.1 };
+    const pnlR = (it as any).pnl || 0;
+    return { ...it, _score: it.openCount * 1000 + pnlR };
   }).sort((a, b) => b._score - a._score);
 
   const embed = new EmbedBuilder()
@@ -506,14 +504,15 @@ async function handleListWallets(interaction: ChatInputCommandInteraction) {
   for (const item of parsedEnriched) {
     const winPct = ((item as any).winRate || 0) * 100;
     const volStr = formatPnL((item as any).volume || 0).replace(/[🟢🔴⚪ ]/g, '');
+    const rank = (item as any).rank;
     const value = `**💰 Portfolio Value:** ${item.portVal}\n` +
-      `**📈 Unrealized PnL:** ${item.unrealStr}   **💵 Net Realized:** ${formatPnL((item as any).netRealized || 0)}\n` +
-      `**🎯 Win Rate (proxy):** ${winPct.toFixed(1)}%   **📊 Approx Volume:** ${volStr}\n` +
-      `**📍 Open positions:** ${item.openCount}   **🐋 Activity Score:** ${Math.round((item as any).score || 0)}\n` +
+      `**📈 Unrealized PnL:** ${item.unrealStr}   **💵 All-Time PnL:** ${formatPnL((item as any).pnl || 0)}\n` +
+      `**🎯 Win Rate:** ${winPct.toFixed(1)}%   **📊 Volume:** ${volStr}\n` +
+      `**📍 Open positions:** ${item.openCount}   **🏆 Leaderboard Rank:** ${rank ? `#${rank}` : 'Unranked'}   **🗂️ Markets Traded:** ${(item as any).marketsTraded || 0}\n` +
       `${item.posSummary}\n` +
       `Last checked: ${item.last}`;
     embed.addFields({
-      name: `**${item.name}** — \`${item.addr}\``,
+      name: `**${item.name}**${(item as any).verifiedBadge ? ' ✅' : ''} — \`${item.addr}\``,
       value: value.length > 1000 ? value.slice(0, 990) + '…' : value,
       inline: false
     });
@@ -543,75 +542,91 @@ async function handleWalletStats(interaction: ChatInputCommandInteraction) {
     return;
   }
 
-  const snapshot = await fetchWalletSnapshot(wallet.address);
-  let { positions, trades, activity } = snapshot;
+  // Push filters down to the SDK request itself (start/end, type) rather than
+  // fetching everything and filtering client-side.
+  const start = days ? Date.now() - days * 86400000 : undefined;
+  const activityType = filter.startsWith('type=')
+    ? [filter.split('=')[1].toUpperCase() as any]
+    : undefined;
+  const showClosed = filter === 'closed';
 
-  if (days) {
-    const cutoff = Date.now() - (days * 86400000);
-    trades = trades.filter((t: any) => t.timestamp && (t.timestamp * 1000 > cutoff));
-    activity = activity.filter((a: any) => a.timestamp && (a.timestamp * 1000 > cutoff));
-  }
-
-  if (filter) {
-    if (filter === 'open') {
-      // positions are open
-    } else if (filter === 'closed') {
-      // for demo, note in embed
-      positions = [];
-    } else if (filter.startsWith('type=')) {
-      const t = filter.split('=')[1].toUpperCase();
-      activity = activity.filter((a: any) => (a.type || '').toUpperCase() === t);
-    }
-  }
+  // ListTradesRequest has no start/end param, so the `days` filter only narrows activity (which does).
+  const [positions, closedPositions, trades, activity, analytics] = await Promise.all([
+    showClosed ? Promise.resolve([]) : fetchPositions(wallet.address),
+    showClosed ? fetchClosedPositions(wallet.address, { sortBy: 'TIMESTAMP', sortDirection: 'DESC' }) : Promise.resolve([]),
+    fetchTrades(wallet.address),
+    fetchActivity(wallet.address, { start, type: activityType }),
+    fetchWalletAnalytics(wallet.address),
+  ]);
 
   const embed = new EmbedBuilder()
-    .setTitle(`📊 ${wallet.name}`)
-    .setDescription(`\`${truncateAddress(wallet.address)}\``)
+    .setTitle(`📊 ${wallet.name}${analytics.verifiedBadge ? ' ✅' : ''}`)
+    .setDescription(`\`${truncateAddress(wallet.address)}\`${analytics.userName ? ` • @${analytics.userName}` : ''}`)
     .setColor(0x00aa55)
     .setTimestamp()
     .setFooter({ text: 'via official @polymarket/client SDK' });
 
-  // === Position Cards ===
-  const open = positions.filter((p: any) => parseFloat(p.size || '0') > 0);
-  if (open.length > 0) {
-    const cards = open.slice(0, 5).map((p: any) => {
-      const title = shortText(p.title || p.slug || 'Market', 48);
-      const outcome = p.outcome ? ` **${p.outcome}**` : '';
-      const size = p.size ? `Size: ${formatDecimal(p.size)}` : '';
-      const avg = p.avgPrice ? ` | Avg: ${formatPrice(p.avgPrice, true)}` : '';
-      const cur = p.curPrice ? ` | Cur: ${formatPrice(p.curPrice, true)}` : '';
-      const pnl = p.cashPnl != null ? `\nPnL: ${formatPnL(p.cashPnl)}` : '';
-      const realized = p.realizedPnl != null ? ` | Realized: ${formatPnL(p.realizedPnl)}` : '';
-      return `**📍 ${title}**${outcome}\n${size}${avg}${cur}${pnl}${realized}`;
-    });
-    embed.addFields({ name: `📈 Open Positions (${open.length})`, value: cards.join('\n\n'), inline: false });
+  if (showClosed) {
+    // === Closed Positions (from listClosedPositions — realized PnL only) ===
+    if (closedPositions.length > 0) {
+      const cards = closedPositions.slice(0, 6).map((p: any) => {
+        const title = shortText(p.title || p.slug || 'Market', 48);
+        const outcome = p.outcome ? ` **${p.outcome}**` : '';
+        const avg = p.avgPrice ? `Avg: ${formatPrice(p.avgPrice, true)}` : '';
+        const realized = p.realizedPnl != null ? ` | Realized: ${formatPnL(p.realizedPnl)}` : '';
+        const ts = p.timestamp ? `\n${formatDate(p.timestamp)}` : '';
+        return `**📍 ${title}**${outcome}\n${avg}${realized}${ts}`;
+      });
+      embed.addFields({ name: `🔒 Closed Positions (${closedPositions.length})`, value: cards.join('\n\n'), inline: false });
+    } else {
+      embed.addFields({ name: '🔒 Closed Positions', value: 'None found', inline: false });
+    }
   } else {
-    embed.addFields({ name: '📈 Open Positions', value: 'None open', inline: false });
+    // === Open Position Cards ===
+    const open = positions.filter((p: any) => parseFloat(p.size || '0') > 0);
+    if (open.length > 0) {
+      const cards = open.slice(0, 5).map((p: any) => {
+        const title = shortText(p.title || p.slug || 'Market', 48);
+        const outcome = p.outcome ? ` **${p.outcome}**` : '';
+        const size = p.size ? `Size: ${formatDecimal(p.size)}` : '';
+        const avg = p.avgPrice ? ` | Avg: ${formatPrice(p.avgPrice, true)}` : '';
+        const cur = p.curPrice ? ` | Cur: ${formatPrice(p.curPrice, true)}` : '';
+        const pnl = p.cashPnl != null ? `\nPnL: ${formatPnL(p.cashPnl)}` : '';
+        const realized = p.realizedPnl != null ? ` | Realized: ${formatPnL(p.realizedPnl)}` : '';
+        const redeemable = p.redeemable ? ' 🏆 *Resolved — redeemable*' : '';
+        return `**📍 ${title}**${outcome}\n${size}${avg}${cur}${pnl}${realized}${redeemable}`;
+      });
+      embed.addFields({ name: `📈 Open Positions (${open.length})`, value: cards.join('\n\n'), inline: false });
+    } else {
+      embed.addFields({ name: '📈 Open Positions', value: 'None open', inline: false });
+    }
+
+    const totalPnl = positions.reduce((sum: number, p: any) => sum + (parseFloat(p.cashPnl || '0') || 0), 0);
+    embed.addFields({ name: '💰 Total Unrealized PnL', value: formatPnL(totalPnl), inline: true });
   }
 
-  // Total PnL summary + analytics
-  const totalPnl = positions.reduce((sum: number, p: any) => sum + (parseFloat(p.cashPnl || '0') || 0), 0);
-  const netReal = computeNetRealized(positions, activity);
-  const winR = computeRoughWinRate(positions, activity);
-  embed.addFields({ name: '💰 Total Unrealized PnL', value: formatPnL(totalPnl), inline: true });
-  embed.addFields({ name: '📊 Net Realized / Win Rate (proxy)', value: `${formatPnL(netReal)} / ${(winR*100).toFixed(1)}%`, inline: true });
-  const vol = computeApproxVolume(activity);
-  embed.addFields({ name: '📈 Approx Volume', value: formatPnL(vol), inline: true });
+  // SDK-sourced leaderboard + closed-position analytics
+  embed.addFields({ name: '📊 All-Time PnL / Win Rate', value: `${formatPnL(analytics.pnl)} / ${(analytics.winRate * 100).toFixed(1)}%`, inline: true });
+  embed.addFields({ name: '📈 Volume', value: formatPnL(analytics.volume), inline: true });
+  embed.addFields({ name: '🏆 Leaderboard Rank', value: analytics.rank ? `#${analytics.rank}` : 'Unranked', inline: true });
+  embed.addFields({ name: '🗂️ Markets Traded', value: `${analytics.marketsTraded}`, inline: true });
 
   // === Recent Trades (formatted) ===
-  if (trades.length > 0) {
-    const tradeLines = trades.slice(0, 6).map((t: any) => {
-      const side = formatSide(t.side);
-      const title = shortText(t.title || t.slug || '—', 42);
-      const outcome = t.outcome ? ` ${t.outcome}` : '';
-      const qty = t.size ? ` ${formatDecimal(t.size)}` : '';
-      const pr = t.price ? ` @ ${formatPrice(t.price, true)}` : '';
-      const ts = t.timestamp ? `\n${formatDate(t.timestamp)}` : '';
-      return `• ${side} **${title}**${outcome}${qty}${pr}${ts}`;
-    });
-    embed.addFields({ name: '💱 Recent Trades', value: tradeLines.join('\n\n'), inline: false });
-  } else {
-    embed.addFields({ name: '💱 Recent Trades', value: 'No recent trades', inline: false });
+  if (!showClosed) {
+    if (trades.length > 0) {
+      const tradeLines = trades.slice(0, 6).map((t: any) => {
+        const side = formatSide(t.side);
+        const title = shortText(t.title || t.slug || '—', 42);
+        const outcome = t.outcome ? ` ${t.outcome}` : '';
+        const qty = t.size ? ` ${formatDecimal(t.size)}` : '';
+        const pr = t.price ? ` @ ${formatPrice(t.price, true)}` : '';
+        const ts = t.timestamp ? `\n${formatDate(t.timestamp)}` : '';
+        return `• ${side} **${title}**${outcome}${qty}${pr}${ts}`;
+      });
+      embed.addFields({ name: '💱 Recent Trades', value: tradeLines.join('\n\n'), inline: false });
+    } else {
+      embed.addFields({ name: '💱 Recent Trades', value: 'No recent trades', inline: false });
+    }
   }
 
   // === Recent Activity (formatted) ===
@@ -695,18 +710,18 @@ async function handleLeaderboard(interaction: ChatInputCommandInteraction) {
   const rankings: any[] = [];
   for (const w of wallets) {
     try {
-      const snap = await fetchWalletSnapshot(w.address);
-      const net = computeNetRealized(snap.positions || [], snap.activity || []);
-      const score = computeActivityScore(snap.positions || [], snap.trades || [], snap.activity || []);
-      rankings.push({ name: w.name || truncateAddress(w.address), pnl: net, score });
+      const a = await fetchWalletAnalytics(w.address);
+      rankings.push({ name: w.name || truncateAddress(w.address), pnl: a.pnl, volume: a.volume, winRate: a.winRate, rank: a.rank, verifiedBadge: a.verifiedBadge, marketsTraded: a.marketsTraded });
     } catch {}
   }
   rankings.sort((a, b) => b.pnl - a.pnl);
   const embed = new EmbedBuilder()
-    .setTitle('🏆 Leaderboard (Net Realized + Activity Score from SDK)')
+    .setTitle('🏆 Leaderboard (All-Time PnL, via official Polymarket leaderboard)')
     .setFooter({ text: 'via official @polymarket/client SDK' });
   rankings.slice(0, 10).forEach((r, i) => {
-    embed.addFields({ name: `${i + 1}. ${r.name}`, value: `${formatPnL(r.pnl)} (score ${Math.round(r.score)})` });
+    const rankStr = r.rank ? `#${r.rank}` : 'Unranked';
+    const badge = r.verifiedBadge ? ' ✅' : '';
+    embed.addFields({ name: `${i + 1}. ${r.name}${badge}`, value: `${formatPnL(r.pnl)} • Vol ${formatPnL(r.volume).replace(/[🟢🔴⚪ ]/g, '')} • Win Rate ${(r.winRate * 100).toFixed(1)}% • ${rankStr} • Markets: ${r.marketsTraded}` });
   });
   await interaction.editReply({ embeds: [embed] });
 }
