@@ -1,6 +1,7 @@
 import { getAllActiveWallets, updateWalletHashes, recordEvent, getUnnotifiedEvents, markEventsNotified, getWalletByAddress, getWalletSettings, hasSeenMarket, markMarketSeen, hasEventWithTx, hasSeenEvent } from './db.js';
 import { fetchWalletSnapshot } from './polymarket.js';
 import { hashState, shortText, sleep, formatPnL, formatSide, formatDate, formatPrice, truncateAddress, formatDecimal, getEventDedupKey } from './utils.js';
+import type { PriceWatcher } from './price-watcher.js';
 
 function buildLinks(data: any): string {
   const pm = data.url;
@@ -15,6 +16,7 @@ export interface TrackerConfig {
   intervalMs: number;
   sendNotification: (payload: string | any) => Promise<void>;
   maxItems: number;
+  priceWatcher?: PriceWatcher;
 }
 
 let running = false;
@@ -31,8 +33,6 @@ export function getTrackingInterval() {
 
 // In-memory previous snapshots for reliable diffing (keyed by normalized address)
 const prevSnapshots = new Map<string, { positions: any[]; activity: any[]; trades: any[] }>();
-
-const resolvedAlerted = new Set<string>();
 
 /**
  * Prime the in-memory snapshot for a wallet so that the next poll can properly diff changes.
@@ -152,30 +152,10 @@ export async function runTrackerOnce(config: TrackerConfig): Promise<void> {
   for (const wallet of wallets) {
     const snapshot = await fetchWalletSnapshot(wallet.address);
 
-    // Resolution predictor: uses the SDK's own `redeemable` flag and `cashPnl` on each
-    // Position (both sourced directly from listPositions) — no market-fetching or custom PnL math.
-    for (const pos of snapshot.positions || []) {
-      const slug = pos.slug;
-      if (slug && pos.redeemable) {
-        const key = `${wallet.address}:${slug}`;
-        if (!resolvedAlerted.has(key)) {
-          const avg = parseFloat(pos.avgPrice || '0');
-          const sz = parseFloat(pos.size || '0');
-          const est = parseFloat(pos.cashPnl || '0') || 0;
-          const emoji = est > 0 ? '🟢' : '🔴';
-          const resEmbed = new EmbedBuilder()
-            .setTitle(`🏆 Market Resolved!`)
-            .setDescription(`**${pos.title || slug}** resolved.`)
-            .addFields(
-              { name: 'Wallet Position', value: `${formatDecimal(sz)} @ ${formatPrice(avg, true)}`, inline: false },
-              { name: 'Est. if redeem now', value: `${emoji} ${formatPnL(est)}` },
-              { name: 'Links', value: pos.url ? `[🔗 Polymarket](${pos.url})` : 'N/A' }
-            )
-            .setFooter({ text: 'via official @polymarket/client SDK' });
-          await config.sendNotification({ embeds: [resEmbed] });
-          resolvedAlerted.add(key);
-        }
-      }
+    // Push current open positions into the PriceWatcher so it can subscribe to their
+    // tokenIds and fire market_resolved notifications via WSS (wins and losses).
+    if (config.priceWatcher) {
+      config.priceWatcher.updateWalletPositions(wallet.address, wallet.name, snapshot.positions);
     }
 
     const positions = snapshot.positions.slice(0, config.maxItems);

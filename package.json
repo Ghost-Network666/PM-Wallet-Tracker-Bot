@@ -10,14 +10,21 @@
     "start": "node dist/index.js",
     "register": "tsx src/register-commands.ts"
   },
-  "keywords": ["polymarket", "discord", "bot", "tracking"],
+  "keywords": [
+    "polymarket",
+    "discord",
+    "bot",
+    "tracking"
+  ],
   "author": "",
   "license": "MIT",
   "dependencies": {
     "@polymarket/client": "0.1.0-beta.7",
+    "@types/ws": "^8.18.1",
     "better-sqlite3": "^11.9.1",
     "discord.js": "^14.18.0",
-    "dotenv": "^16.4.7"
+    "dotenv": "^16.4.7",
+    "ws": "^8.21.0"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",

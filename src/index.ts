@@ -3,6 +3,7 @@ import { Client, GatewayIntentBits, Partials, Events, TextChannel } from 'discor
 import { initDb, getDb, closeDb, getAllActiveWallets } from './db.js';
 import { handleCommand, commands } from './commands.js';
 import { startTracker, stopTracker } from './tracker.js';
+import { PriceWatcher } from './price-watcher.js';
 import { sleep } from './utils.js';
 
 dotenv.config();
@@ -29,6 +30,7 @@ const client = new Client({
 });
 
 let notificationChannel: TextChannel | null = null;
+let priceWatcher: PriceWatcher | null = null;
 
 async function sendNotification(payload: string | any) {
   if (!notificationChannel) {
@@ -68,12 +70,17 @@ client.once(Events.ClientReady, async (c) => {
     console.warn('⚠️  Notifications will not be sent until channel is fixed.');
   }
 
+  // Start price watcher (Market Channel WSS for live prices + market_resolved events)
+  priceWatcher = new PriceWatcher(sendNotification);
+  priceWatcher.connect();
+
   // Start background tracker
   console.log(`🚀 Starting background tracker (interval: ${TRACKING_INTERVAL}ms)`);
   startTracker({
     intervalMs: TRACKING_INTERVAL,
     sendNotification,
     maxItems: MAX_FETCH_ITEMS,
+    priceWatcher,
   }).catch(err => console.error('Tracker crashed:', err));
 });
 
@@ -112,6 +119,7 @@ client.on(Events.Error, (err) => {
 process.on('SIGINT', async () => {
   console.log('\nShutting down...');
   stopTracker();
+  priceWatcher?.destroy();
   client.destroy();
   closeDb();
   await sleep(300);
@@ -120,6 +128,7 @@ process.on('SIGINT', async () => {
 
 process.on('SIGTERM', async () => {
   stopTracker();
+  priceWatcher?.destroy();
   client.destroy();
   closeDb();
   process.exit(0);
